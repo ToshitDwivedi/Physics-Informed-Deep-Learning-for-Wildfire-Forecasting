@@ -9,15 +9,11 @@
 
 ## Motivation
 
-![Motivation](assets/images/slide_motivation.png)
+<img src="assets/images/wildfire_satellite.png" width="600"/>
 
-Wildfires are increasing in frequency and intensity worldwide, causing massive loss of life, infrastructure, and biodiversity. The core challenge in wildfire management is **predicting where fire will spread 24 hours ahead** using satellite observations and environmental data — fast enough to guide real-time evacuation and resource deployment.
+Wildfires are increasing in frequency and intensity worldwide, causing massive loss of life, infrastructure, and biodiversity. The challenge is **predicting where fire will spread 24 hours ahead** using satellite observations and environmental data — fast enough to guide real-time evacuation and resource deployment.
 
-Traditional physics-based simulators (FARSITE, Rothermel) are interpretable but computationally prohibitive for real-time use. Pure deep learning models are fast but physically naive — they can predict fire spreading against wind or across non-fuel regions. **PI-VMUNet bridges this gap.**
-
----
-
-## The Research Gap
+Traditional physics-based simulators (FARSITE, Rothermel) are interpretable but computationally prohibitive. Pure deep learning models are fast but physically naive — they can predict fire spreading against wind or across non-fuel regions. **PI-VMUNet bridges this gap.**
 
 | Approach | Physical Realism | Inference Speed |
 |----------|-----------------|-----------------|
@@ -29,60 +25,53 @@ Traditional physics-based simulators (FARSITE, Rothermel) are interpretable but 
 
 ## Why Vision Mamba?
 
-![Why Vision Mamba](assets/images/slide_why_mamba.png)
+![Why Vision Mamba](assets/images/why_mamba.png)
 
-### State Space Models (SSMs) and Mamba
-
-**State Space Models** are a class of sequence models that map an input sequence to an output sequence through a hidden state. The continuous-time SSM is defined as:
+**State Space Models (SSMs)** are a class of sequence models that map inputs to outputs through a hidden state. The continuous-time SSM is:
 
 ```
 h'(t) = A·h(t) + B·x(t)
 y(t)  = C·h(t)
 ```
 
-**Mamba** (Gu & Dao, 2023) introduces *selective* state space — the system matrices `(B, C, Δ)` become input-dependent, allowing the model to selectively propagate or forget information based on content:
+**Mamba** (Gu & Dao, 2023) makes the parameters `(B, C, Δ)` input-dependent — selectively propagating or forgetting information based on content. **Vision Mamba** extends this to 2D spatial data by scanning image patches in multiple directions, achieving:
 
-```
-Δ = Softplus(Linear(x))        # input-dependent time-step
-```
+- **O(N) complexity** vs O(N²) for Transformers — critical for large satellite imagery
+- **Global spatial context** — CNNs are limited to local receptive fields
+- **Long-range dependencies** — fire spread dynamics span large spatial regions
 
-**Vision Mamba** adapts Mamba for 2D spatial data by scanning image patches in multiple directions, achieving:
-- **O(N) complexity** vs O(N²) for Transformers — crucial for large satellite imagery
-- **Global context modelling** with linear memory — CNNs are limited to local receptive fields
-- **Strong long-range spatial dependency** — fire spread dynamics span large spatial regions
-
-**VM-UNet** (Ruan & Xiang, 2024) extends Vision Mamba into a U-Net encoder-decoder backbone for dense prediction tasks, making it ideal for per-pixel wildfire segmentation.
+**VM-UNet** (Ruan & Xiang, 2024) wraps Vision Mamba into a U-Net encoder-decoder for dense per-pixel prediction, making it ideal for wildfire segmentation.
 
 ---
 
 ## Rothermel Wildfire Physics
 
-![Rothermel Physics](assets/images/slide_rothermel.png)
+![Rothermel Physics](assets/images/rothermel_physics.png)
 
-The **Rothermel (1972)** model is the empirical foundation of all modern wildfire simulators. It estimates the Rate of Spread (RoS) of a fire front as:
+The **Rothermel (1972)** model is the empirical foundation of all modern wildfire simulators. It estimates Rate of Spread (RoS) as:
 
 ```
 R = (I_R · ξ · (1 + φ_w + φ_s)) / (ρ_b · ε · Q_ig)
 ```
 
-where:
-- `I_R` — Reaction intensity (kW/m²)
-- `ξ` — Propagating flux ratio
-- `φ_w` — Wind factor
-- `φ_s` — Slope factor
-- `ρ_b` — Fuel bulk density (kg/m³)
-- `ε` — Effective heating number
-- `Q_ig` — Heat of pre-ignition (kJ/kg)
+| Symbol | Meaning |
+|--------|---------|
+| `I_R` | Reaction intensity (kW/m²) |
+| `ξ` | Propagating flux ratio |
+| `φ_w` | Wind factor |
+| `φ_s` | Slope factor |
+| `ρ_b` | Fuel bulk density (kg/m³) |
+| `Q_ig` | Heat of pre-ignition (kJ/kg) |
 
-This thesis implements a **differentiable RothermelLayer** in PyTorch that computes a per-pixel Rate of Spread approximation from the 24-channel input tensor. The normalized RoS map `R̃ ∈ [0, 1]` is used as a physics guidance signal inside the PGSS gate at every encoder and decoder block.
+This thesis implements a **differentiable `RothermelLayer`** in PyTorch ([rothermel.py](rothermel.py)) that computes a per-pixel RoS map from the 24-channel input tensor. The normalized map `R̃ ∈ [0, 1]` drives the PGSS gate at every encoder and decoder block.
 
 ---
 
 ## Physics-Gated Selective Scan (PGSS) — Core Contribution
 
-![PGSS Block](assets/images/slide_pgss_block.png)
+![PGSS Block](assets/images/pgss_block.png)
 
-The **PGSS block** is the central architectural novelty. In standard Mamba, the time-step Δ is learned purely from data. PGSS modulates Δ with a physics gate derived from Rothermel's Rate of Spread:
+In standard Mamba, the time-step Δ is learned purely from data. PGSS gates Δ with Rothermel's Rate of Spread:
 
 ```
 Standard Mamba:   Δ = Softplus(Linear(x))
@@ -90,55 +79,52 @@ PI-VMUNet (PGSS): Δ = Softplus(Linear(x)) · gate(R̃)
                   gate(R̃) = (1 − α) + α · R̃
 ```
 
-where `R̃ ∈ [0, 1]` is the normalized RoS and `α ∈ [0.001, 0.999]` is a **learnable scalar** that controls how strongly physics modulates the scan.
+- **`R̃ ∈ [0, 1]`** — normalized per-pixel Rate of Spread
+- **`α ∈ [0.001, 0.999]`** — learnable scalar; controls how strongly physics modulates the scan
 
 **Physical intuition:**
-- `R̃ → 0` (no spread risk): gate attenuates Δ → state transitions suppressed
-- `R̃ → 1` (maximum spread): gate → 1.0 → full state propagation retained
-- `α` is learned — the model decides how much to trust physics vs. data
+- `R̃ → 0` (low spread risk) → gate attenuates Δ → state transitions suppressed
+- `R̃ → 1` (high spread risk) → gate = 1.0 → full state propagation retained
+- `α` is **learned** — the model decides how much to trust physics vs. data
 
-This places physics not as an external regularizer, but **inside the internal state-space dynamics** of the network.
+Physics is embedded inside the SSM's state transition dynamics — not just as an input feature or post-hoc regularizer.
 
 ---
 
 ## Complete PI-VMUNet Framework
 
-![Complete Framework](assets/images/slide_framework.png)
+![PI-VMUNet Architecture](assets/images/framework.png)
 
 The end-to-end pipeline:
 
-1. **NDWS Dataset** — 24-channel multi-modal environmental inputs (fuel, topography, weather, moisture, fire history)
-2. **Preprocessing Pipeline** — Resampling, normalization, patch extraction, stacking to `X ∈ ℝ^{B×24×H×W}`
-3. **Differentiable Rothermel Layer** — Computes per-pixel Rate of Spread `R ∈ ℝ^{B×1×H×W}` from physics inputs
-4. **Physics Gate (PGSS)** — Gated features `F_gate = G ⊙ F_ros` where `G ∈ [0, 1]`
-5. **Vision Mamba U-Net Backbone** — Encoder (downsampling) → Mamba backbone → Decoder (upsampling)
-6. **Prediction** — `R̂ ∈ ℝ^{B×1×H×W}` wildfire spread probability map
+1. **NDWS Dataset** — 24-channel multi-modal environmental inputs
+2. **Preprocessing Pipeline** — Resampling, normalization, patch extraction → `X ∈ ℝ^{B×24×H×W}`
+3. **Differentiable Rothermel Layer** — Per-pixel Rate of Spread `R ∈ ℝ^{B×1×H×W}`
+4. **Physics Gate (PGSS)** — `F_gate = G ⊙ F_ros` where `G ∈ [0, 1]`
+5. **Vision Mamba U-Net** — Encoder → Mamba blocks → Decoder
+6. **Output** — `R̂ ∈ ℝ^{B×1×H×W}` wildfire spread probability map
 
 ---
 
 ## Dataset: Next Day Wildfire Spread (NDWS)
 
-The **NDWS dataset** (Huot et al., IEEE TGRS 2022) is a large-scale satellite-derived dataset for wildfire spread prediction in the United States.
+The **NDWS dataset** (Huot et al., IEEE TGRS 2022) provides large-scale satellite-derived wildfire spread data across the United States.
 
 | Property | Value |
 |----------|-------|
 | Input channels | 12 raw → 24 engineered |
-| Spatial resolution | 64×64 (upsampled to 128×128) |
-| Train samples | 14,979 |
-| Validation samples | 1,877 |
-| Test samples | 1,689 |
+| Spatial resolution | 128×128 |
+| Train / Val / Test | 14,979 / 1,877 / 1,689 |
 | Target | Binary fire mask at T+24h |
-| Split strategy | Event-based (prevents spatial leakage) |
-
-**Raw input channels** include: NDVI, EVI, elevation, slope, aspect, canopy height, population density, erc, temperature, wind speed, wind direction, precipitation, drought index, active fire mask.
+| Split strategy | Event-based (prevents spatial data leakage) |
 
 **Engineered features** added by `FullPreprocessingPipeline` ([transforms.py](transforms.py)):
-- Slope & aspect computed from elevation via Sobel operators
-- Wind U/V decomposition from speed + direction
-- Fuel moisture proxy features
+- Slope & aspect via Sobel operators on elevation
+- Wind U/V decomposition
+- Fuel moisture proxies
 - Rothermel input channel mapping (fuel model, load, heat content)
 
-The dataset exhibits **severe class imbalance** (~1–2% fire pixels), addressed via Focal Loss with γ=2 and hard negative mining.
+Class imbalance (~1–2% fire pixels) is handled by Focal Loss with γ=2.
 
 ---
 
@@ -148,19 +134,17 @@ The dataset exhibits **severe class imbalance** (~1–2% fire pixels), addressed
 L_total = L_Seg + λ_PDE · L_PDE + λ_Eik · L_Eik
 ```
 
-- **L_Seg** = Dice Loss + Focal Loss (γ=2, α=0.25) — primary segmentation objective
-- **L_PDE** = Level-set regularization inspired by wildfire front PDE dynamics *(experimental)*
-- **L_Eik** = Eikonal boundary smoothness constraint *(experimental)*
+- **`L_Seg`** = Dice Loss + Focal Loss (γ=2, α=0.25)
+- **`L_PDE`** = Level-set regularization for wildfire front dynamics *(under experimentation)*
+- **`L_Eik`** = Eikonal boundary smoothness constraint *(under experimentation)*
 
-A **3-phase curriculum scheduler** ramps up λ_PDE gradually during training so the model first learns basic segmentation before physics regularization is introduced.
+A 3-phase curriculum scheduler gradually ramps up `λ_PDE` so the model first learns basic segmentation before physics regularization is applied.
 
 ---
 
-## Experimental Results
+## Results
 
-![Results](assets/images/slide_results.png)
-
-### Quantitative Comparison — NDWS Test Set
+### NDWS Test Set
 
 | Metric | VM-UNet (baseline) | PI-VMUNet (ours) |
 |--------|-------------------|-----------------|
@@ -171,33 +155,14 @@ A **3-phase curriculum scheduler** ramps up λ_PDE gradually during training so 
 | PR-AUC ↑ | 0.3149 | 0.2901 |
 | ECE ↓ | 0.0151 | **0.0112** |
 
-**Converged gate parameter: α = 0.4979** — confirms physics is actively utilized.
+**Converged gate parameter: α = 0.4979** — confirms the physics gate is actively utilized.
 
-### Interpretation
+The PGSS gate shifts prediction behavior from aggressive (high recall) to **physically constrained (higher precision)**:
+- **+19.8% higher precision** — fire predicted only where physics supports spread
+- **−25.8% lower ECE** — better-calibrated probability estimates
+- The near-0.5 α value shows the model balances data-driven and physics-guided learning equally
 
-The PGSS gate measurably shifts prediction behavior:
-- **+19.8% higher precision** — fewer false positives, fire predicted only where physics indicates spread
-- **Better calibration (ECE)** — 25.8% lower Expected Calibration Error
-- Lower recall reflects more conservative, physically constrained predictions
-- The gate parameter α ≈ 0.5 shows the model balances data and physics equally
-
----
-
-## Conclusion & Future Work
-
-![Conclusion](assets/images/slide_conclusion.png)
-
-**Key contributions:**
-1. Differentiable Rothermel Layer — embeds fire physics into a learnable PyTorch module
-2. Physics-Gated Selective Scan (PGSS) — physics controls internal SSM state transitions
-3. Physics-guided Vision Mamba — complete PI-VMUNet architecture
-4. End-to-end evaluation on NDWS benchmark
-
-**Planned future work:**
-- Activate and stabilize PDE-based physics loss (L_PDE, L_Eikonal)
-- Physics–Accuracy Pareto analysis across 36 configurations
-- Monte Carlo Dropout for uncertainty quantification maps
-- Optimize CUDA kernels for PGSS to reduce training overhead
+Training logs tracked on [Weights & Biases](https://wandb.ai/toshitdwivedi-indian-institute-of-information-technology/pi-vm).
 
 ---
 
@@ -210,15 +175,15 @@ ForestFire/
 ├── trainer.py                  # Training framework (all models, WandB, checkpointing)
 ├── wildfire_dataset.py         # NDWS HDF5 dataset loader
 ├── transforms.py               # 24-channel preprocessing pipeline
-├── notebook_1_resnet_unet.py   # Baseline: ResNet-UNet (TFRecord + PyTorch)
+├── notebook_1_resnet_unet.py   # Baseline: ResNet-UNet (TFRecord loader)
 ├── notebook_2_swin_unet.py     # Baseline: Swin-UNet
 ├── notebook_3_vm_unet.py       # Baseline: VM-UNet
 ├── notebook_4_comparison.py    # Cross-model comparison
 ├── notebook_5_pi_vmunet_phase3b.py  # PI-VMUNet — main experiment
 ├── validate_rothermel.py       # Physics module validation
 ├── test_pgss.py                # PGSS unit tests
-├── test_transforms.py          # Preprocessing tests
-└── assets/images/              # Slide figures (Rothermel, PGSS, framework, results)
+├── test_transforms.py          # Preprocessing pipeline tests
+└── assets/images/              # Architecture and physics diagrams
 ```
 
 ---
@@ -235,23 +200,28 @@ pip install -r requirements.txt
 
 **Dataset:** Download the NDWS HDF5 file from [Huot et al. (2022)](https://github.com/google-research/google-research/tree/master/simulation_research/next_day_wildfire_spread) and set `hdf5_path` in `wildfire_dataset.py`.
 
-## Running
-
 ```bash
-# Main experiment: PI-VMUNet
+# Train PI-VMUNet (main experiment)
 python notebook_5_pi_vmunet_phase3b.py
 
 # VM-UNet baseline
 python notebook_3_vm_unet.py
 
-# Cross-model comparison
-python notebook_4_comparison.py
-
-# Validate physics module
+# Validate Rothermel physics module
 python validate_rothermel.py
+
+# Run unit tests
+python test_pgss.py && python test_transforms.py
 ```
 
-Training logs tracked on [Weights & Biases](https://wandb.ai/toshitdwivedi-indian-institute-of-information-technology/pi-vm).
+---
+
+## Future Work
+
+- Activate and stabilize PDE-based physics loss (L_PDE, L_Eikonal)
+- Physics–accuracy Pareto analysis across 36 hyperparameter configurations
+- Monte Carlo Dropout for uncertainty quantification maps
+- CUDA kernel optimization for PGSS to reduce training overhead
 
 ---
 
